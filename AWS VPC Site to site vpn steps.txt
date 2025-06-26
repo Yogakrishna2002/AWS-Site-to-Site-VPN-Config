@@ -1,0 +1,189 @@
+# AWS Site-to-Site VPN Setup Steps 
+
+
+
+* Public VPC CIDR (AWS VPC-A): 10.0.0.0/16
+* Private VPC CIDR (Simulated DC): 11.0.0.0/16
+* AWS Private Subnet: 10.0.2.0/24
+* DC Public Subnet: 11.0.2.0/24
+
+---
+
+1. VPC Setup
+
+---
+
+\[AWS Side - Mumbai Region]
+
+* Create VPC: 10.0.0.0/16
+* Create Private Subnet: 10.0.2.0/24
+* Create Route Table, associate it with private subnet
+
+\[Simulated DC - N. Virginia Region]
+
+* Create VPC: 11.0.0.0/16
+* Create IGW, attach to VPC
+* Create Public Subnet: 11.0.2.0/24
+* Create Route Table, associate with public subnet
+* Add default route (0.0.0.0/0) pointing to IGW
+
+---
+
+2. EC2 Launch
+
+---
+
+\[AWS EC2 in 10.0.2.0/24]
+
+* Private IP only
+* Security Group:
+
+  * Inbound: Allow ICMP from 11.0.0.0/16
+  * Outbound: Allow All
+
+\[DC EC2 (VPN Server) in 11.0.2.0/24]
+
+* Amazon Linux 2023 AMI
+* Public IP enabled
+* Security Group:
+
+  * Inbound: Allow ICMP from 10.0.0.0/16
+  * Inbound: Allow SSH from your IP
+  * Outbound: Allow All
+* Disable Source/Destination Check (EC2 Actions > Networking)
+
+---
+
+3. Create Virtual Private Gateway (VGW)
+
+---
+
+* Go to Mumbai VPC Console
+* Create VGW (default ASN)
+* Attach VGW to VPC 10.0.0.0/16
+* Edit Route Table of 10.0.2.0/24:
+
+  * Add 0.0.0.0/0 pointing to VGW
+
+---
+
+4. Create Customer Gateway (CGW)
+
+---
+
+* Go to Mumbai VPC Console → Customer Gateways → Create Customer Gateway
+* Name: CGW-DC-VPN
+* Routing: Static
+* IP Address: Public IP of your EC2-VPN (e.g. 13.250.64.164)
+* Device: Generic
+* Leave BGP ASN default (if not using BGP)
+* Click Create
+
+---
+
+5. Create VPN Connection
+
+---
+
+* Go to Site-to-Site VPN → Create VPN Connection
+* Name: AWS-DC-VPN
+* Target Gateway Type: Virtual Private Gateway
+* Virtual Private Gateway: Select VGW
+* Customer Gateway: Existing → Select CGW-DC-VPN
+* Routing Option: Static
+
+  * Static Prefixes: 11.0.0.0/16
+* Local IPv4 network: 11.0.0.0/16
+* Remote IPv4 network: 10.0.0.0/16
+* Create and wait for setup
+
+---
+
+6. Download VPN Configuration
+
+---
+
+* Select Vendor: Openswan (works for Libreswan)
+* Download and save config
+
+---
+
+7. Configure DC VPN Server (Libreswan)
+
+---
+
+1. SSH into EC2-VPN (11.0.2.0/24)
+2. Add Fedora repo to /etc/yum.repos.d/fedora.repo
+3. Install Libreswan:
+   sudo dnf --enablerepo=fedora install libreswan -y
+4. Enable IP forwarding:
+   Edit /etc/sysctl.conf:
+   net.ipv4.ip\_forward = 1
+   net.ipv4.conf.default.rp\_filter = 0
+   net.ipv4.conf.default.accept\_source\_route = 0
+   Apply:
+   sudo sysctl -p
+5. Edit /etc/ipsec.conf:
+   Uncomment:
+   include /etc/ipsec.d/\*.conf
+6. Create /etc/ipsec.d/aws.conf:
+   conn Tunnel1
+   authby=secret
+   auto=start
+   type=tunnel
+   ike=aes128-sha1;modp2048
+   esp=aes128-sha1
+   keyexchange=ike
+   left=13.250.64.164
+   leftid=13.250.64.164
+   leftsubnet=11.0.0.0/16
+   leftsourceip=169.254.129.74
+   right=3.7.52.164
+   rightid=3.7.52.164
+   rightsubnet=10.0.0.0/16
+   rightsourceip=169.254.129.73
+   ikelifetime=28800s
+   salifetime=3600s
+   dpddelay=10
+   dpdtimeout=30
+   dpdaction=restart
+   mtu=1436
+   fragmentation=yes
+7. Create /etc/ipsec.d/aws.secrets:
+   13.250.64.164 3.7.52.164 : PSK "SCwBrhOSSaf45Q0MA0pNJHScMuRCtyGn"
+8. Tunnel Interface:
+   sudo ip addr add 169.254.129.74/30 dev ip\_vti0
+   sudo ip link set ip\_vti0 up
+   sudo ip route add 10.0.0.0/16 via 169.254.129.73 dev ip\_vti0
+9. Start and verify IPsec:
+   sudo ipsec auto --add Tunnel1
+   sudo systemctl restart ipsec
+   sudo ipsec auto --up Tunnel1
+   sudo ipsec status
+
+---
+
+8. Connectivity Test
+
+---
+
+* From DC EC2: ping 10.0.2.x
+* From AWS EC2: ping 11.0.2.x (if applicable)
+
+---
+
+9. Troubleshooting
+
+---
+
+* journalctl -xeu ipsec.service
+* ipsec status
+* Enable logs in /etc/ipsec.conf:
+  logfile=/var/log/pluto.log
+  plutodebug="base"
+* Check AWS route table has:
+
+  * 11.0.0.0/16 → VGW
+* Check Security Groups on both sides
+
+---
